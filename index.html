@@ -257,8 +257,8 @@ const CONFIG = {
   price: '$15.99',                 // shown on the page only; the real price lives in Stripe
   priceNote: 'Yours forever — about what one free tour expects in tips.',
   checkoutUrl: '#',               // Lemon Squeezy checkout link for the all-access product
-  workerUrl: 'https://budgetwalk-guides.budgetwalk.workers.dev',  
-catalogUrl: 'catalog.json',
+  workerUrl: '',                  // e.g. 'https://guides.budgetwalk.com' - the guide server
+  catalogUrl: 'catalog.json',
   freeSample: true                // show stop 1 narration as a free listen
 };
 /* ================================ */
@@ -268,12 +268,45 @@ const $ = id => document.getElementById(id);
 let catalog = null, activeCountry = null, usingSample = false;
 
 // Access state: a token issued by the guide server after a valid licence key.
-const TOKEN_KEY = 'bw_token', INST_KEY = 'bw_instance';
+const TOKEN_KEY = 'bw_token', INST_KEY = 'bw_instance', LIC_KEY = 'bw_key', SEEN_KEY = 'bw_checked';
+const RECHECK_HOURS = 24;   // silently re-check the licence this often while online
 function getToken(){ try{ return localStorage.getItem(TOKEN_KEY) || ''; }catch(e){ return ''; } }
 function setToken(t){ try{ t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY); }catch(e){} }
 // This device's activation slot, so re-entering the key here never uses a second one.
 function getInstance(){ try{ return localStorage.getItem(INST_KEY) || ''; }catch(e){ return ''; } }
 function setInstance(i){ try{ if(i) localStorage.setItem(INST_KEY, i); }catch(e){} }
+// The buyer's own key is kept on their device so re-checks need nothing from them.
+function getKey(){ try{ return localStorage.getItem(LIC_KEY) || ''; }catch(e){ return ''; } }
+function setKey(k){ try{ k ? localStorage.setItem(LIC_KEY, k) : localStorage.removeItem(LIC_KEY); }catch(e){} }
+function clearAccess(){ setToken(''); setKey(''); try{ localStorage.removeItem(SEEN_KEY); }catch(e){} }
+
+// Ask the guide server whether this licence is still good. Revalidating an existing
+// activation costs no activation slot. A network failure leaves access alone.
+async function recheckLicence(){
+  const key = getKey();
+  if(!key || !CONFIG.workerUrl) return;
+  let last = 0;
+  try{ last = Number(localStorage.getItem(SEEN_KEY)) || 0; }catch(e){}
+  if(Date.now() - last < RECHECK_HOURS * 36e5) return;
+  try{
+    const r = await fetch(CONFIG.workerUrl + '/activate', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({key, instance: getInstance()})
+    });
+    if(r.status === 403){                 // refunded, disabled, or no longer valid
+      clearAccess();
+      $('signinLink').textContent = 'Open your guides';
+      showCountry(activeCountry || catalog.countries[0].slug);
+      return;
+    }
+    const d = await r.json();
+    if(d && d.token){
+      setToken(d.token); setInstance(d.instance); setKey(key);
+    try{ localStorage.setItem(SEEN_KEY, String(Date.now())); }catch(e){}
+      try{ localStorage.setItem(SEEN_KEY, String(Date.now())); }catch(e){}
+    }
+  }catch(e){ /* offline or server unreachable: keep working */ }
+}
 function hasAccess(){ return !!getToken(); }
 function guideUrl(c){
   return `${CONFIG.workerUrl}/guide/${c.file.replace(/^tours\//,'').replace(/\.html$/,'')}?t=${encodeURIComponent(getToken())}`;
@@ -298,7 +331,8 @@ async function submitKey(){
     });
     const d = await r.json();
     if(!r.ok || !d.token){ $('keyMsg').textContent = d.error || 'That key was not accepted.'; return; }
-    setToken(d.token); setInstance(d.instance);
+    setToken(d.token); setInstance(d.instance); setKey(key);
+    try{ localStorage.setItem(SEEN_KEY, String(Date.now())); }catch(e){}
     $('keyDialog').close();
     showCountry(activeCountry || catalog.countries[0].slug);
     $('signinLink').textContent = 'Your guides are unlocked';
@@ -453,7 +487,7 @@ function init(){
   $('keySubmit').addEventListener('click', submitKey);
   $('keyCancel').addEventListener('click', () => $('keyDialog').close());
   $('keyInput').addEventListener('keydown', e => { if(e.key === 'Enter') submitKey(); });
-  if(hasAccess()) $('signinLink').textContent = 'Your guides are unlocked';
+  if(hasAccess()){ $('signinLink').textContent = 'Your guides are unlocked'; recheckLicence(); }
   $('detail').addEventListener('click', e => { if(e.target === $('detail')) $('detail').close(); });
   $('detail').addEventListener('close', stopSpeaking);
   $('dMore').addEventListener('click', () => {
